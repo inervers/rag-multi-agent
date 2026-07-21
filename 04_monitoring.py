@@ -210,9 +210,20 @@ class TracedWriter(TracedAgent):
 
 
 class TracedReviewer(TracedAgent):
-    SYSTEM_PROMPT = """你是严格的内容审核员。输出 JSON 格式：
+    SYSTEM_PROMPT = """你是严苛的内容审核员。输出 JSON 格式：
 {"issues": [...], "rating": 1-5, "verdict": "通过/需要修改"}
-评分低于 4 时必须输出"需要修改"。"""
+
+评分标准：
+- 5分：完美（几乎不用）
+- 4分：很好
+- 3分：一般
+- 2分：较差
+- 1分：不合格
+
+规则：
+- 评分低于 4 必须输出"需要修改"
+- 必须指出至少 2 个具体问题
+- 如果只有比喻没有技术细节，评分不超过 3"""
 
     def execute(self, article: str, research: str) -> str:
         result = self.think(f"审核文章：\n{article}\n\n参考：{research}")
@@ -249,6 +260,7 @@ def run_pipeline(topic: str, logger: TraceLogger, max_retries: int = 1) -> dict:
 
     # 写作 + 审核循环
     final_rating = 0
+    previous_rating = 0
     passed = False
     for attempt in range(max_retries + 1):
         raw_article = writer.execute(topic, research_result, attempt)
@@ -278,12 +290,22 @@ def run_pipeline(topic: str, logger: TraceLogger, max_retries: int = 1) -> dict:
             rating=final_rating
         )
 
+        # 绝对通过
         if verdict == "通过" or final_rating >= 4:
             passed = True
             logger.log(agent="pipeline", action="completed", status="ok",
                        detail=f"passed after {attempt + 1} attempt(s)")
             break
 
+        # 相对改进：评分比上一轮高就放行
+        if previous_rating > 0 and final_rating > previous_rating:
+            passed = True
+            logger.log(agent="pipeline", action="completed", status="ok",
+                       detail=f"improved {previous_rating}->{final_rating}, passed")
+            print(f"  \u21b3 评分从 {previous_rating} 提升到 {final_rating}，放行")
+            break
+
+        previous_rating = final_rating
         logger.log(agent="pipeline", action="retry", status="retry",
                    detail=f"rating={final_rating}, round {attempt + 1}")
 
