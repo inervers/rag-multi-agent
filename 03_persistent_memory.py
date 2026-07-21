@@ -133,7 +133,7 @@ class MemoryAugmentedAgent:
         self.model = model
         self.temperature = temperature
         self.memory = MemoryStore(name)
-        self.memory.clear()  # 每次运行清空旧记忆，保证对比公平
+        # 保留旧记忆，让 Agent 能跨轮次学习
 
     def think(self, user_msg: str) -> str:
         response = client.chat.completions.create(
@@ -202,12 +202,25 @@ class MemoryWriter(MemoryAugmentedAgent):
 
 
 class MemoryReviewer(MemoryAugmentedAgent):
-    SYSTEM_PROMPT = """你是严格的内容审核员。输出 JSON 格式：
+    SYSTEM_PROMPT = """你是苛刻的内容审核员。输出 JSON 格式：
 {"issues": [...], "rating": 1-5, "verdict": "通过/需要修改"}
-评分低于 4 时必须输出"需要修改"。
 
-重要：检查这篇文章相比之前的版本是否有改进。
-如果之前提出的问题已解决，请不要再重复提相同的问题。"""
+你的评分标准：
+- 5分：完美，几乎不用
+- 4分：很好，但有改进空间
+- 3分：一般，需要明显修改
+- 2分：较差，大篇幅重写
+- 1分：不合格
+
+规则：
+- 评分高于 4 才算通过
+- 每次必须指出至少 2 个具体问题
+- 如果只有比喻没有技术原理，评分不能超过 3
+
+审稿策略：
+- 第1次审稿：严格指出所有问题
+- 后续审稿：重点检查之前的问题是否已改进
+- 如果质量有明显提升，给 4 分放行，不需要追求完美"""
 
     def execute(self, article: str, research: str) -> str:
         memories = self.retrieve_relevant_memories("审核")
@@ -248,6 +261,7 @@ def run_with_memory(topic: str, max_retries: int = 2):
     researcher.send("写作者", "research_result", research_json)
 
     # === 写作 + 审核循环 ===
+    previous_rating = 0  # 追踪上一轮评分，用于改进判定
     for attempt in range(1, max_retries + 2):
         print(f"\n\u25b6 写作者工作中（第 {attempt} 稿）...")
         raw_article = writer.execute(topic, research_result, attempt - 1)
@@ -269,14 +283,16 @@ def run_with_memory(topic: str, max_retries: int = 2):
         except:
             review_json = {"issues": [], "rating": 3, "verdict": "需要修改"}
 
-        print(f"  评分：{review_json.get('rating', 'N/A')}/5  |  裁决：{review_json.get('verdict', 'N/A')}")
+        current_rating = review_json.get("rating", 0)
+        verdict = review_json.get("verdict", "需要修改")
+        print(f"  评分：{current_rating}/5  |  裁决：{verdict}")
         if review_json.get("issues"):
             print(f"  意见：{review_json.get('issues')}")
 
         # 保存审核结果到审核员和写作者的记忆
         reviewer.record_memory(
             f"审核{topic}第{attempt}稿",
-            f"评分{review_json.get('rating')}，裁决{review_json.get('verdict')}",
+            f"评分{current_rating}，裁决{verdict}",
             review_json.get("issues", [])
         )
         writer.record_memory(
@@ -284,9 +300,24 @@ def run_with_memory(topic: str, max_retries: int = 2):
             f"收到审核意见：{review_json.get('issues', [])}",
         )
 
-        if review_json.get("verdict") == "通过" or review_json.get("rating", 0) >= 4:
+        # === 通过条件：绝对达标 或 相对改进 ===
+        passed = (verdict == "通过" or current_rating >= 4)
+
+        # 相对改进：评分比上一轮高，且不低于 3 分，就放行
+        if not passed and previous_rating > 0 and current_rating > previous_rating and current_rating >= 3:
+            print(f"  ↳ 评分从 {previous_rating} 提升到 {current_rating}，改进明显，放行")
+            passed = True
+
+        # 最后一轮：如果评分没下降，且高于 2 分，也算通过（够好了）
+        if not passed and attempt > max_retries and current_rating >= previous_rating and current_rating > 2:
+            print(f"  ↳ 最后一轮评分 {current_rating}，未下降，放行")
+            passed = True
+
+        if passed:
             print(f"\n\u2713 审核通过！")
             break
+
+        previous_rating = current_rating
 
         if attempt > max_retries:
             print(f"\n\u2716 超出最大重试次数")
