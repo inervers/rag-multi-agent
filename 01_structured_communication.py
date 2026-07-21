@@ -114,22 +114,25 @@ client = OpenAI()
 class BaseAgent:
     """Agent 基类，所有 Agent 继承这个"""
 
-    def __init__(self, name: str, system_prompt: str, bus: MessageBus):
+    def __init__(self, name: str, system_prompt: str, bus: MessageBus,
+                 model: str = "deepseek-chat", temperature: float = 0.3):
         self.name = name
         self.system_prompt = system_prompt
         self.bus = bus
+        self.model = model
+        self.temperature = temperature
         self.memory: list[dict] = []  # 当前对话记忆
 
     def think(self, user_msg: str) -> str:
         """调用 LLM 思考"""
         self.memory.append({"role": "user", "content": user_msg})
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model=self.model,
             messages=[
                 {"role": "system", "content": self.system_prompt},
                 *self.memory[-10:]  # 只保留最近 10 轮
             ],
-            temperature=0.3,
+            temperature=self.temperature,
             max_tokens=1024
         )
         reply = response.choices[0].message.content
@@ -246,9 +249,16 @@ def run_structured_pipeline(topic: str):
 
     bus = MessageBus()
 
-    researcher = ResearcherAgent("研究员", ResearcherAgent.SYSTEM_PROMPT, bus)
-    writer = WriterAgent("写作者", WriterAgent.SYSTEM_PROMPT, bus)
-    reviewer = ReviewerAgent("审核员", ReviewerAgent.SYSTEM_PROMPT, bus)
+    # 为不同角色指定不同模型和 temperature
+    # 研究员用默认 deepseek-chat，要稳定
+    researcher = ResearcherAgent("研究员", ResearcherAgent.SYSTEM_PROMPT, bus,
+                                 temperature=0.1)
+    # 写作者：0.4 兼顾准确和可读，不完全复述也不自己编
+    writer = WriterAgent("写作者", WriterAgent.SYSTEM_PROMPT, bus,
+                         temperature=0.4)
+    # 审核员严格按规则，temperature 最低
+    reviewer = ReviewerAgent("审核员", ReviewerAgent.SYSTEM_PROMPT, bus,
+                             temperature=0.1)
 
     start = time.time()
 
